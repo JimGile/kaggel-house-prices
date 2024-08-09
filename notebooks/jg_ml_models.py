@@ -1,92 +1,50 @@
 # Import the modules
 import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+
 from matplotlib.axes import Axes
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import RidgeCV
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from typing import Optional
 
 
 class ModelPreprocessor:
-    def __init__(self, df: pd.DataFrame, random_state=1):
+    def __init__(self, df: pd.DataFrame, target_col: str, random_state=1):
         self.df = df
-        self.index_col = df.index.name
-        self.random_state = random_state
+        self.index_col: str = df.index.name
+        self.target_col: str = target_col
+        self.random_state: int = random_state
 
-    def get_df(self) -> pd.DataFrame:
-        return self.df
+    def get_numeric_columns(self, df: Optional[pd.DataFrame] = None) -> list:
+        if df is None:
+            df = self.df
+        return list(df.select_dtypes(include='number').columns)
 
-    def get_random_state(self) -> int:
-        return self.random_state
+    def get_columns_to_encode(self, df: Optional[pd.DataFrame] = None) -> list:
+        if df is None:
+            df = self.df
+        return list(df.select_dtypes(include='object').columns)
 
-    def set_random_state(self, random_state: int) -> None:
-        self.random_state = random_state
-
-    def get_numeric_columns(self) -> list:
-        return list(self.df.select_dtypes(include='number').columns)
-
-    def get_correlation_matrix_abs_numeric_features_df(self,
-                                                       numeric_cols: list,
-                                                       target_col: str) -> pd.DataFrame:
-        scaled_df = self.scale_numeric_columns(numeric_cols)
-        correlation_matrix_abs = scaled_df.corrwith(scaled_df[target_col]).abs().sort_values(ascending=False)
-        correlation_matrix_abs_df = pd.DataFrame(correlation_matrix_abs, columns=['correlation']).drop(target_col)
-        return correlation_matrix_abs_df
-
-    def get_top_correlated_abs_numeric_features_list(self,
-                                                     numeric_cols: list,
-                                                     target_col: str,
-                                                     corr_min: float) -> list:
-        correlation_matrix_abs_df = self.get_correlation_matrix_abs_numeric_features_df(numeric_cols, target_col)
-        return list(correlation_matrix_abs_df[correlation_matrix_abs_df['correlation'] > corr_min].index)
-
-    def get_correlation_matrix_abs_encoded_features_df(self, encode_cols: list, target_col: str) -> pd.DataFrame:
-        encoded_df = self.encode_string_columns_ohe(encode_cols, target_col)
-        abs_correlation_matrix = encoded_df.corrwith(encoded_df[target_col]).abs().sort_values(ascending=False)
-        abs_correlation_matrix_df = pd.DataFrame(abs_correlation_matrix, columns=['correlation']).drop(target_col)
-        return abs_correlation_matrix_df
-
-    def get_top_correlated_abs_encoded_features_list(self, encode_cols: list, target_col: str, corr_min: float) -> list:
-        correlation_matrix_abs_df = self.get_correlation_matrix_abs_encoded_features_df(encode_cols, target_col)
-        top_corr_encoded_features = list(
-            correlation_matrix_abs_df[correlation_matrix_abs_df['correlation'] > corr_min].index
-        )
-        return list(set([item.split('_')[0] for item in top_corr_encoded_features]))
-
-    def get_top_feature_cols(self,
-                             numeric_cols: list,
-                             corr_min_1: float,
-                             encode_cols: list,
-                             corr_min_2: float,
-                             target_col: str) -> list:
-        top_feature_cols: list[str] = self.get_top_correlated_abs_numeric_features_list(
-            numeric_cols, target_col, corr_min_1
-        )
-        top_feature_cols.extend(self.get_top_correlated_abs_encoded_features_list(
-            encode_cols=encode_cols, target_col=target_col, corr_min=corr_min_2)
-        )
-        return top_feature_cols
-
-    def get_non_numeric_columns(self) -> list:
-        return list(self.df.select_dtypes(exclude='number').columns)
-
-    def get_columns_to_encode(self) -> list:
-        return list(self.df.select_dtypes(include='object').columns)
-
-    def scale_numeric_columns(self, numeric_cols: list) -> pd.DataFrame:
-        # Standardize the data
-        scaled_vals = StandardScaler().fit_transform(self.df[numeric_cols])
+    def scale_numeric_columns(self, df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+        if df is None:
+            df = self.df
+        index_col: str = df.index.name
+        numeric_cols = self.get_numeric_columns(df)
+        scaled_vals = StandardScaler().fit_transform(df[numeric_cols])
         # Create a DataFrame from the scaled data
         scaled_df = pd.DataFrame(scaled_vals, columns=numeric_cols)
         # Recreate the index if needed
-        if self.index_col is not None:
+        if index_col is not None:
             # Recreate the index
-            scaled_df[self.index_col] = self.df.index
-            scaled_df = scaled_df.set_index(self.index_col)
+            scaled_df[index_col] = df.index
+            scaled_df = scaled_df.set_index(index_col)
         return scaled_df
-
-    def encode_string_columns(self, non_numeric_cols: list) -> pd.DataFrame:
-        # Return a DataFrame with the encoded data as new columns
-        return pd.get_dummies(self.df[non_numeric_cols])
 
     def encode_string_columns_ohe(self, encode_cols: list, target_col: str) -> pd.DataFrame:
         # Return a DataFrame with the encoded data as new columns
@@ -102,6 +60,116 @@ class ModelPreprocessor:
             return scaled_df
         encoded_df = self.encode_string_columns(encode_cols)
         return pd.concat([scaled_df, encoded_df], axis=1)
+
+    def get_x_y(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+        return df.copy().drop(self.target_col, axis=1), df[self.target_col]
+
+    def train_test_split(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+        X, y = self.get_x_y(df)
+        return train_test_split(X, y, random_state=self.random_state)
+
+    def get_pd_corr_abs_numeric_features_df(self,
+                                            scaled_df: pd.DataFrame) -> pd.DataFrame:
+        X, y = self.get_x_y(scaled_df)
+        corr_data_abs = X.corrwith(other=y).abs()
+        corr_coeff_abs_df = pd.DataFrame(
+            corr_data_abs,
+            columns=['correlation']
+        )
+        return corr_coeff_abs_df
+
+    def get_ridge_coeff_abs_numeric_features_df(self,
+                                                scaled_df: pd.DataFrame) -> pd.DataFrame:
+        X, y = self.get_x_y(scaled_df.dropna())
+        ridge = RidgeCV(alphas=np.logspace(-6, 6, num=7)).fit(X, y)
+        print(f"Best alpha: {ridge.alpha_} (R^2 score: {ridge.score(X, y): .2f})")
+        importance: np.ndarray = np.abs(ridge.coef_)
+        importance /= importance.max()
+        coefs_df = pd.DataFrame(
+            importance,
+            columns=['coefficient'],
+            index=X.columns,
+        )
+        return coefs_df
+
+    def get_lr_pvals_numeric_features_df(self,
+                                         scaled_df: pd.DataFrame) -> pd.DataFrame:
+        X_train, X_test, y_train, y_test = self.train_test_split(scaled_df.dropna())
+        lr = sm.OLS(y_train, X_train).fit()
+        pvals = round(lr.pvalues, 6).values
+        pvals_df = pd.DataFrame(
+            pvals,
+            columns=['pval'],
+            index=lr.pvalues.index,
+        )
+        return pvals_df
+
+    def get_combined_important_numeric_features_df(self,
+                                                   scaled_df: pd.DataFrame) -> pd.DataFrame:
+        coef_df = self.get_ridge_coeff_abs_numeric_features_df(scaled_df)
+        corr_df = self.get_pd_corr_abs_numeric_features_df(scaled_df)
+        pvals_df = self.get_lr_pvals_numeric_features_df(scaled_df)
+        combo_df = pd.concat([corr_df, coef_df, pvals_df], axis=1)
+        
+        # combo_df = corr_df.merge(coef_df, left_index=True, right_index=True)
+        # combo_df = combo_df.merge(pvals_df, left_index=True, right_index=True)
+        # combo_df = self.scale_numeric_columns(combo_df)
+        combo_df['total'] = combo_df['correlation'] + combo_df['coefficient'] + combo_df['pval']
+        return combo_df.sort_values(by='total', ascending=False)
+
+    def get_top_total_numeric_features_list(self,
+                                            scaled_df: pd.DataFrame,
+                                            total_min: float) -> list:
+        combo_df = self.get_combined_important_numeric_features_df(scaled_df)
+        return list(combo_df[combo_df['total'] > total_min].index)
+
+    def plot_feature_selection(self, df: pd.DataFrame) -> None:
+        df.plot(
+            kind='bar',
+            title='Feature selection',
+            legend=True,
+            xlabel='Feature',
+            ylabel='Values')
+
+    def get_pd_corr_abs_encoded_features_df(self, encoded_df: pd.DataFrame) -> pd.DataFrame:
+        abs_correlation_matrix = encoded_df.corrwith(
+            encoded_df[self.target_col]
+        ).abs().sort_values(ascending=False)
+        abs_correlation_matrix_df = pd.DataFrame(
+            abs_correlation_matrix,
+            columns=['correlation']
+        ).drop(self.target_col)
+        return abs_correlation_matrix_df
+
+    def get_top_corr_abs_encoded_features_list(self, encoded_df: pd.DataFrame, corr_min: float) -> list:
+        correlation_matrix_abs_df = self.get_pd_corr_abs_encoded_features_df(encoded_df)
+        top_corr_encoded_features = list(
+            correlation_matrix_abs_df[correlation_matrix_abs_df['correlation'] > corr_min].index
+        )
+        return list(set([item.split('_')[0] for item in top_corr_encoded_features]))
+
+    def get_top_feature_cols(self,
+                             scaled_df: pd.DataFrame,
+                             total_min: float,
+                             encoded_df: pd.DataFrame,
+                             corr_min: float) -> list:
+        top_feature_cols: list[str] = self.get_top_total_numeric_features_list(scaled_df, total_min)
+        top_feature_cols.extend(self.get_top_corr_abs_encoded_features_list(encoded_df, corr_min))
+        return top_feature_cols
+
+    def get_random_forest_important_features_df(self, scaled_df: pd.DataFrame, n_estimators: int) -> pd.DataFrame:
+        # Train and evaluate the Random Forest model
+        X, y = self.get_x_y(scaled_df)
+        clf = RandomForestClassifier(random_state=self.random_state, n_estimators=n_estimators)
+        clf.fit(X, y)
+        score = clf.score(X, y)
+        acc_score = accuracy_score(y, clf.predict(self.X))
+        print(f'RF: training Score: {score}, accuracy score: {acc_score}')
+        rf_imp_df = pd.DataFrame(
+            clf.feature_importances_,
+            index=X.columns, columns=['rf_importance']
+        ).sort_values('rf_importance', ascending=False)
+        return rf_imp_df
 
     def get_elbow_df(self, k_start: int, k_end: int) -> pd.DataFrame:
         # Create a dictionary that holds the list of values for k and inertia
@@ -148,7 +216,8 @@ class ModelPreprocessor:
         inertia_range = elbow_df['inertia'].max() - elbow_df['inertia'].min()
         pct_decrease_total = 0
         for i in range(1, len(elbow_df['k'])):
-            pct_decrease = (elbow_df['inertia'][i-1] - elbow_df['inertia'][i]) / inertia_range * 100
+            pct_decrease = (elbow_df['inertia'][i-1] -
+                            elbow_df['inertia'][i]) / inertia_range * 100
             pct_decrease_total += pct_decrease
             if best_k == 0:
                 if pct_decrease_total > 90:
@@ -176,7 +245,8 @@ class JgKMeans(ModelPreprocessor):
         return self.model
 
     def fit(self, k: int) -> None:
-        self.model = KMeans(n_clusters=k, n_init='auto', random_state=self.random_state)
+        self.model = KMeans(n_clusters=k, n_init='auto',
+                            random_state=self.random_state)
         self.model.fit(self.df)
 
     def predict(self, predict_col_name: str) -> pd.DataFrame:
