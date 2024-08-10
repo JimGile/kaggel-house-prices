@@ -11,6 +11,7 @@ from sklearn.linear_model import RidgeCV
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from statsmodels.stats.outliers_influence import variance_inflation_factor
 from typing import Optional
 
 
@@ -21,21 +22,45 @@ class ModelPreprocessor:
         self.target_col: str = target_col
         self.random_state: int = random_state
 
+    def remove_cols_with_mostly_same_values(self, freq_value_threshold=0.9) -> pd.DataFrame:
+        self.df = self.df.loc[:, self.df.apply(
+            lambda col: col.value_counts(normalize=True).max() < freq_value_threshold
+        )]
+        return self.df
+
+    def get_x_y(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+        return df.copy().drop(self.target_col, axis=1), df[self.target_col]
+
+    def get_x_y_reshaped(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+        return df.copy().drop(self.target_col, axis=1), df[self.target_col].reshape(-1, 1)
+
+    def train_test_split(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+        X, y = self.get_x_y(df)
+        return train_test_split(X, y, random_state=self.random_state)
+
     def get_numeric_columns(self, df: Optional[pd.DataFrame] = None) -> list:
         if df is None:
             df = self.df
         return list(df.select_dtypes(include='number').columns)
 
-    def get_columns_to_encode(self, df: Optional[pd.DataFrame] = None) -> list:
+    def get_categorical_columns(self, df: Optional[pd.DataFrame] = None) -> list:
         if df is None:
             df = self.df
-        return list(df.select_dtypes(include='object').columns)
+        return list(df.select_dtypes(include=['object', 'category']).columns)
 
     def scale_numeric_columns(self, df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         if df is None:
             df = self.df
+        numeric_cols = self.get_numeric_columns(df.drop(self.target_col, axis=1))
+        scaled_vals = StandardScaler().fit_transform(df[numeric_cols])
+        # Create a DataFrame from the scaled data
+        return pd.DataFrame(scaled_vals, columns=numeric_cols)
+
+    def scale_numeric_columns_with_idx(self, df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+        if df is None:
+            df = self.df
         index_col: str = df.index.name
-        numeric_cols = self.get_numeric_columns(df)
+        numeric_cols = self.get_numeric_columns(df.drop(self.target_col, axis=1))
         scaled_vals = StandardScaler().fit_transform(df[numeric_cols])
         # Create a DataFrame from the scaled data
         scaled_df = pd.DataFrame(scaled_vals, columns=numeric_cols)
@@ -46,31 +71,34 @@ class ModelPreprocessor:
             scaled_df = scaled_df.set_index(index_col)
         return scaled_df
 
-    def encode_string_columns_ohe(self, encode_cols: list, target_col: str) -> pd.DataFrame:
-        # Return a DataFrame with the encoded data as new columns
+    def encode_categorical_columns_ohe(self, df: Optional[pd.DataFrame] = None) -> Optional[pd.DataFrame]:
+        if df is None:
+            df = self.df
+        encode_cols = self.get_categorical_columns(df.drop(self.target_col, axis=1))
+        if encode_cols is None or len(encode_cols) == 0:
+            return None
         ohe = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
         ohe.set_output(transform="pandas")
-        encoded_df = ohe.fit_transform(self.df[encode_cols])
-        encoded_df[target_col] = self.df[target_col]
-        return encoded_df
+        return ohe.fit_transform(self.df[encode_cols])
 
-    def get_scaled_and_encoded_df(self, scale_cols: list, encode_cols: list) -> pd.DataFrame:
-        scaled_df = self.scale_numeric_columns(scale_cols)
-        if encode_cols is None or len(encode_cols) == 0:
+    def get_scaled_and_encoded_df(self, df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+        if df is None:
+            df = self.df
+        scaled_df = self.scale_numeric_columns(df)
+        encoded_df = self.encode_categorical_columns_ohe(df)
+        if encoded_df is None:
             return scaled_df
-        encoded_df = self.encode_string_columns(encode_cols)
-        return pd.concat([scaled_df, encoded_df], axis=1)
+        return pd.concat([scaled_df, encoded_df, df[self.target_col]], axis=1)
 
-    def get_x_y(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
-        return df.copy().drop(self.target_col, axis=1), df[self.target_col]
-
-    def train_test_split(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-        X, y = self.get_x_y(df)
-        return train_test_split(X, y, random_state=self.random_state)
+    def get_encoded_and_scaled_df(self, df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+        if df is None:
+            df = self.df
+        sae_df = self.get_scaled_and_encoded_df(df)
+        return self.scale_numeric_columns(sae_df)
 
     def get_pd_corr_abs_numeric_features_df(self,
                                             scaled_df: pd.DataFrame) -> pd.DataFrame:
-        X, y = self.get_x_y(scaled_df)
+        X, y = self.get_x_y(scaled_df.dropna())
         corr_data_abs = X.corrwith(other=y).abs()
         corr_coeff_abs_df = pd.DataFrame(
             corr_data_abs,
@@ -94,27 +122,40 @@ class ModelPreprocessor:
 
     def get_lr_pvals_numeric_features_df(self,
                                          scaled_df: pd.DataFrame) -> pd.DataFrame:
+        # Looking forp-values < 0.05 which are statistically signicant so subtract from 1 to get values to add to total
         X_train, X_test, y_train, y_test = self.train_test_split(scaled_df.dropna())
         lr = sm.OLS(y_train, X_train).fit()
         pvals = round(lr.pvalues, 6).values
+        pvals_inv = 1. - pvals
         pvals_df = pd.DataFrame(
-            pvals,
-            columns=['pval'],
+            pvals_inv,
+            columns=['pval_inv'],
             index=lr.pvalues.index,
         )
         return pvals_df
 
+    def get_vif_numeric_features_df(self, scaled_df: pd.DataFrame) -> pd.DataFrame:
+        X, y = self.get_x_y(scaled_df.dropna())
+        vif = [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
+        vif_inv = [1 / v for v in vif]
+        vif_df = pd.DataFrame()
+        vif_df["variables"] = X.columns
+        vif_df["vif"] = vif
+        vif_df["vif_inv"] = vif_inv
+        return vif_df.set_index("variables")
+
     def get_combined_important_numeric_features_df(self,
                                                    scaled_df: pd.DataFrame) -> pd.DataFrame:
-        coef_df = self.get_ridge_coeff_abs_numeric_features_df(scaled_df)
         corr_df = self.get_pd_corr_abs_numeric_features_df(scaled_df)
+        coef_df = self.get_ridge_coeff_abs_numeric_features_df(scaled_df)
         pvals_df = self.get_lr_pvals_numeric_features_df(scaled_df)
-        combo_df = pd.concat([corr_df, coef_df, pvals_df], axis=1)
+        vif_df = self.get_vif_numeric_features_df(scaled_df)
+        combo_df = pd.concat([corr_df, coef_df, pvals_df, vif_df], axis=1)
         
         # combo_df = corr_df.merge(coef_df, left_index=True, right_index=True)
         # combo_df = combo_df.merge(pvals_df, left_index=True, right_index=True)
         # combo_df = self.scale_numeric_columns(combo_df)
-        combo_df['total'] = combo_df['correlation'] + combo_df['coefficient'] + combo_df['pval']
+        combo_df['total'] = combo_df['correlation'] + combo_df['coefficient'] + combo_df['pval_inv']
         return combo_df.sort_values(by='total', ascending=False)
 
     def get_top_total_numeric_features_list(self,
