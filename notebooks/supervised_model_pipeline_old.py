@@ -28,39 +28,11 @@ from sklearn.model_selection import cross_validate, KFold, BaseCrossValidator
 
 
 def feature_name_combiner(feature_name: str, category: str) -> str:
-    """
-    Combine the given feature name and category into a single string.
-
-    Args:
-        feature_name (str): The name of the feature.
-        category (str): The category of the feature.
-
-    Returns:
-        str: The combined feature name and category.
-    """
     return f"{feature_name}__{category}"
 
 
 class SelectedFeaturesTransformer(BaseEstimator, TransformerMixin):
-    """
-    Selects the specified features from the input dataframe. If selected_feature_list is None,
-    then all features are selected.
-
-    Args:
-        BaseEstimator (_type_): _description_
-        TransformerMixin (_type_): _description_
-    """
     def __init__(self, selected_feature_list: Optional[list[str]] | None):
-        """
-        Initializes a new instance of the class with the given selected feature list.
-
-        Parameters:
-            selected_feature_list (Optional[list[str]] | None): The list of selected features. 
-            If None, all features are selected.
-
-        Returns:
-            None
-        """
         self.selected_feature_list: list[str] = selected_feature_list
 
     def fit(self, X: pd.DataFrame, y=None):
@@ -85,25 +57,13 @@ class SimplePruner(BaseEstimator, TransformerMixin):
     def __init__(self,
                  infreq: float,
                  pct_miss: float):
-        """
-        Initializes a new instance of the class with the given values for infreq and pct_miss.
-
-        Parameters:
-            infreq (float): The percentage threshold for removing columns with mostly the same value.
-                It will only include columns with a max value_counts less than or equal to infreq.
-                Set it to 1.0 to include all columns.
-            pct_miss (float): The percentage threshold for removing columns with missing values.
-
-        Returns:
-            None
-        """
         self.infreq = infreq
         self.pct_miss = pct_miss
 
     def fit(self, X, y=None):
         x_df = pd.DataFrame(X)
         self.x_pruned: pd.DataFrame = x_df.loc[:, x_df.apply(
-            lambda col: col.value_counts(normalize=True).max() <= self.infreq
+            lambda col: col.value_counts(normalize=True).max() < self.infreq
         )]
         self.x_pruned: pd.DataFrame = self.x_pruned.loc[:, self.x_pruned.apply(
             lambda col: col.isna().mean() < self.pct_miss
@@ -132,11 +92,11 @@ class GenericSupervisedModelExecutor:
             random_state (int, optional): The random seed for reproducibility. Defaults to 42.
 
         Attributes:
+            test_size (float): The proportion of the dataset to include in the test split.
+            random_state (int): The random seed for reproducibility.
             prune_threshold_numerical(float): The column pruning threshold for numerical columns.
                 Defaults to 1.0, no pruning.
             prune_threshold_categorical(float): The column pruning threshold for categorical columns.
-                Defaults to 1.0, no pruning.
-            prune_pct_missing(float): The column pruning threshold for missing values. 
                 Defaults to 1.0, no pruning.
             ordinal_encoding_cols(dict[str, list]): The dictionary of columns that need ordinal encoding.
         """
@@ -973,7 +933,6 @@ class RegressorMultiModelEvaluator(GenericSupervisedModelExecutor):
         """
         # Preprocess the new data
         X_scaled = self.feature_transformer.fit_transform(new_data)
-        print(f'Number scaled X cols: {X_scaled.shape[1]}')
 
         # Make predictions
         self.predictions = self.best_model.predict(X_scaled)
